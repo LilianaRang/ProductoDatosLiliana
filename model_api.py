@@ -11,10 +11,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import pickle
 import numpy
 
+from ml_model import get_confusion_matrix
+
 # ---------------------------------------------------------------------------------------
 #                       Configuración del proyecto
 # Se usa la biblioteca Flask-RESTX para convertir la aplicación web en un API REST.
-# Consulta la documentación de la biblioteca aquí: https://flask-restx.readthedocs.io/en/latest/quickstart.html
+# Consulta la documentación de la biblioteca aquí: 
+# https://flask-restx.readthedocs.io/en/latest/quickstart.html
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app)
 
@@ -47,7 +50,8 @@ api = Api(
 # recursos que exponga el API. Para este proyecto se usa sólo un namespace de nombre
 # "predicciones". Es un recurso genérico para crear este ejemplo. Cambia el nombre del
 # espacio de nombres por uno más acorde a tu proyecto. 
-# Consulta la documentación de los espacios de nombre aquí: https://flask-restx.readthedocs.io/en/latest/scaling.html
+# Consulta la documentación de los espacios de nombre aquí: 
+# https://flask-restx.readthedocs.io/en/latest/scaling.html
 ns = api.namespace('predicciones', description='predicciones')
 
 # Para evitar una referencia circular en las dependencias del código, los modelos que
@@ -55,9 +59,7 @@ ns = api.namespace('predicciones', description='predicciones')
 # proyecto. 
 # Consulta el script "models.py" para conocer y modificar los mapeos de tablas en la 
 # base de datos.
-
 from db_models import Prediction
-
 db.create_all()
 
 # =======================================================================================
@@ -76,21 +78,29 @@ observacion_repr = api.model('Observacion', {
     'petal_width': fields.Float(description="Anchura del pétalo"),
 })
 
-# =======================================================================================
-predictive_model = pickle.load(open('simple_model.pkl', 'rb'))
+# Este objeto represetan una observación calificada. Contiene las mismas variables 
+# necesarias para realizar la clasificación, además de la clasificación o categoría
+# real de la observación. En este caso es el tipo de flor.
+#
+# Reemplaza esta clase por una más apropiada para tu modelo.
 classified_observation = api.model('ObservacionCalificada', {
     'sepal_length': fields.Float(description="Longitud del sépalo"),
     'sepal_width': fields.Float(description="Anchura del sépalo"),
     'petal_length': fields.Float(description="Longitud del pétalo"),
     'petal_width': fields.Float(description="Anchura del pétalo"),
-    'class': fields.String(description='Clase real de la flor')
+    'observed_class': fields.String(description='Clase real de la flor')
 })
 
+# =======================================================================================
+# La siguiente línea reconstruye el estado del modelo desde el momento en que se guardó
+# en disco duro, en el script ml_models.py. De esta forma es como el modelo pasa del
+# ambiente de entrenamiento y pruebas al ambiente en producción.
+predictive_model = pickle.load(open('simple_model.pkl','rb'))
 
 # =======================================================================================
 # Las siguientes clases modelan las solicitudes REST al API. Usamos el objeto del espacio
 # de nombres "ns" para que RESTX comprenda que estas clases y métodos son los manejadores
-# del API REST.
+# del API REST. 
 
 # La siguiente línea indica que esta clase va a manejar los recursos que se encuentran en
 # el URI raíz (/), y que soporta los métodos GET y POST.
@@ -110,7 +120,7 @@ class PredictionListAPI(Resource):
         # Prediction.query.all() obtiene un listado de todas las predicciones de la base
         # de datos. Internamente ejecuta un "SELECT * FROM predicciones".
         # Consulta el script models.py para conocer más de este mapeo.
-        # Además, consulta la documentación de SQL Alchemy para conocer los métodos
+        # Además, consulta la documentación de SQL Alchemy para conocer los métodos 
         # disponibles para consultar la base de datos desde los modelos de Python.
         # https://flask-sqlalchemy.palletsprojects.com/en/2.x/queries/#querying-records
         return [
@@ -141,7 +151,6 @@ class PredictionListAPI(Resource):
             prediction.petal_length, prediction.petal_width,
         ])]
         prediction.predicted_class = str(predictive_model.predict(model_data)[0])
-        print(prediction.predicted_class)
         # ---------------------------------------------------------------------
 
         # Las siguientes dos líneas de código insertan la predicción a la base
@@ -162,10 +171,11 @@ class PredictionListAPI(Resource):
 
 
 # =======================================================================================
-# La siguiente línea de código maneja las solicitudes GET del listado de predicciones
+# La siguiente línea de código maneja las solicitudes GET del listado de predicciones 
 # acompañadas de un identificador de predicción, para obtener los datos de una particular
-# Si el API permite modificar predicciones particulares, aquí se debería de manejar el
-# método PUT o PATCH para una predicción en particular.
+#
+# Los métodos PUT y PATCH actualizan una predicción con el resultado de la observación
+# real, de tal forma que se puedan obtener métricas de desempeño del modelo.
 def _update_observation(prediction_id):
     """
     """
@@ -205,21 +215,77 @@ class PredictionAPI(Resource):
             # base de datos a un recurso REST
             return marshall_prediction(prediction), 200
 
+    # -----------------------------------------------------------------------------------
+    # ns.expect permite a la biblioteca RESTX esperar una representación de un recurso
+    # en formato JSON. En este caso el recurso es un objeto de tipo classified_observation
+    # que representa una observación clasificada.
     @ns.doc({'prediction_id': 'Identificador de la predicción'})
     @ns.expect(classified_observation)
     def put(self, prediction_id):
         """ Este método maneja la actualización de una observación con la clase que
             tiene en la realidad.
-        """
-        return _update_observation(prediction_id)
 
+            PUT y PATCH realizan la misma operación.
+        """
+        return self._update_observation(prediction_id)
+
+    # -----------------------------------------------------------------------------------
+    # ns.expect permite a la biblioteca RESTX esperar una representación de un recurso
+    # en formato JSON. En este caso el recurso es un objeto de tipo classified_observation
+    # que representa una observación clasificada.
     @ns.doc({'prediction_id': 'Identificador de la predicción'})
     @ns.expect(classified_observation)
     def patch(self, prediction_id):
-        """ El metodo controla la actualizacion, la diferencia es el metodo, pende de la regla del HATEOAS
-        y del desarrollador que integre o no la norma.
+        """ Este método maneja la actualización de una observación con la clase que
+            tiene en la realidad.
+
+            PUT y PATCH realizan la misma operación.
         """
         return self._update_observation(prediction_id)
+
+
+    # -----------------------------------------------------------------------------------
+    def _update_observation(self, prediction_id):
+        """
+        """
+        prediction = Prediction.query.filter_by(prediction_id=prediction_id).first()
+        if not prediction:
+            return 'Id {} no existe en la base de datos'.format(prediction_id), 404
+        else:
+            # ---------------------------------------------------------------------------
+            # Modifica este bloque de código para actualizar la observación con la clase
+            # real. No olvides actualizar la observación en la base de datos, para poder
+            # calcular las métricas de desempeño del modelo.
+            observed_class = api.payload.get('observed_class')
+            prediction.observed_class = observed_class
+            db.session.commit()
+            return 'Observación actualizada: {}'.format(observed_class), 200
+            # ---------------------------------------------------------------------------
+
+
+# =======================================================================================
+# La clase ModelPerformanceAPI devuelve el desempeño del modelo, según las observaciones
+# que se han actualizado con las clases reales.
+# Modifica esta clase para que se adapte a tu modelo predictivo.
+@ns.route('/performance/<string:metric>', methods=['GET'])
+class ModelPerformanceAPI(Resource):
+    """ Manejador del recurso REST para el desempeño del modelo.
+    """
+    
+    # -----------------------------------------------------------------------------------
+    @ns.doc({'metric': 'Nombre de la métrica a generar'})
+    def get(self, metric):
+        """ Devuelve los datos de desempeño del modelo.
+        """
+        if metric == 'confusion_matrix':
+            # el método isnot de las propiedades del modelo permiten buscar las 
+            # observaciones que ya están calificadas
+            reported_predictions = Prediction.query.filter(
+                Prediction.observed_class.isnot(None) 
+            ).all()
+            return get_confusion_matrix(reported_predictions), 200
+        else:
+            return 'Métrica no soportada: {}'.format(metric), 400
 
 
 # =======================================================================================
@@ -234,8 +300,10 @@ def marshall_prediction(prediction):
         'sepal_width': prediction.sepal_width,
         'petal_length': prediction.petal_length,
         'petal_width': prediction.petal_width,
-        "class": str(prediction.predicted_class)
+        "predicted_class": str(prediction.predicted_class)
     }
+    if prediction.observed_class:
+        model_data['observed_class'] = prediction.observed_class
     response = {
         "api_id": prediction.prediction_id,
         "url": f'{api.base_url[:-1]}{response_url}',
@@ -247,8 +315,10 @@ def marshall_prediction(prediction):
 
 # ---------------------------------------------------------------------------------------
 def trunc(number, digits):
-    """ Función utilería para truncar un número a un número de dígitos
+    """ Función utilería para truncar un número a un número de dígitos dado
+        :param digits: El número de digitos a truncar el número
     """
     import math
     stepper = 10.0 ** digits
     return math.trunc(stepper * number) / stepper
+    
